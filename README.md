@@ -15,7 +15,7 @@ This repository documents the **complete journey**, including:
 * Final working deployment
 
 This is **not a demo script**.
-This is how disk monitoring should be done in **real production environments**.
+This is how disk monitoring should be implemented in **real production environments**.
 
 ---
 
@@ -30,13 +30,13 @@ Common issues:
 * Credentials are hardcoded (security risk)
 * Cron jobs fail due to missing paths or permissions
 
-The goal was to build:
+The goal was to build a solution that is:
 
-* A **secure**
-* **automated**
-* **auditable**
-* **cron-safe**
-  solution using AWS best practices.
+* Secure
+* Automated
+* Auditable
+* Cron-safe
+* Production-ready
 
 ---
 
@@ -69,42 +69,37 @@ Error: Topic does not exist
 
 ### 🔍 Investigation
 
-Listing SNS topics in `us-east-1` showed:
-
-* ws-resource-creation-alerts
-* bedrock-haiku-budget-alert
-* cloudtrail-pb9-notifications
-* spectra-send-notification
-
-❌ The required topic **`disk-space-alerts` did not exist**
+SNS topics were listed in the target region, but the required topic for disk monitoring was **missing**.
 
 ### ✅ Root Cause
 
-The SNS topic was **never created in the account/region**.
+The SNS topic for disk alerts had **not been created** in the correct AWS account and region.
 
 This issue was **not related to**:
 
 * IAM
-* Email
+* Email subscriptions
 * AWS CLI
 * Permissions
 
-SNS is **region-specific**, and topics must exist **before subscribing or publishing**.
+SNS is **region-scoped**, and topics must exist **before subscribing or publishing**.
 
 ---
 
-## ✅ Correct Design Decision
+## ✅ Design Decision: One Topic per Concern
 
-### One Topic Per Concern (Best Practice)
+| Use Case          | SNS Topic Naming Example |
+| ----------------- | ------------------------ |
+| Disk Monitoring   | `disk-space-alerts`      |
+| CloudTrail Events | `cloudtrail-*`           |
+| Budget Alerts     | `*-budget-alerts`        |
+| Infra Automation  | `resource-*`             |
 
-| Use Case          | SNS Topic Name    |
-| ----------------- | ----------------- |
-| Disk Monitoring   | disk-space-alerts |
-| CloudTrail Events | cloudtrail-*      |
-| Budget Alerts     | *-budget-alert    |
-| Infra Automation  | resource-*        |
+This keeps alerts:
 
-This keeps alerts **clean, searchable, and maintainable**.
+* Isolated
+* Maintainable
+* Easy to debug
 
 ---
 
@@ -115,31 +110,30 @@ This keeps alerts **clean, searchable, and maintainable**.
 ```bash
 aws sns create-topic \
   --name disk-space-alerts \
-  --region us-east-1
+  --region <AWS_REGION>
 ```
 
-Expected output:
+Example output:
 
 ```json
 {
-  "TopicArn": "arn:aws:sns:us-east-1:891146181139:disk-space-alerts"
+  "TopicArn": "arn:aws:sns:<AWS_REGION>:<ACCOUNT_ID>:disk-space-alerts"
 }
 ```
 
 ---
 
-### 2️⃣ Subscribe Email
+### 2️⃣ Subscribe Email to SNS
 
 ```bash
 aws sns subscribe \
-  --topic-arn arn:aws:sns:us-east-1:891146181139:disk-space-alerts \
+  --topic-arn arn:aws:sns:<AWS_REGION>:<ACCOUNT_ID>:disk-space-alerts \
   --protocol email \
-  --notification-endpoint your-email@example.com \
-  --region us-east-1
+  --notification-endpoint <YOUR_EMAIL> \
+  --region <AWS_REGION>
 ```
 
-📧 **Email confirmation is mandatory**
-Unconfirmed subscriptions receive **zero alerts**.
+📧 Email confirmation is **mandatory**.
 
 ---
 
@@ -152,7 +146,7 @@ Unconfirmed subscriptions receive **zero alerts**.
     {
       "Effect": "Allow",
       "Action": "sns:Publish",
-      "Resource": "arn:aws:sns:us-east-1:891146181139:disk-space-alerts"
+      "Resource": "arn:aws:sns:<AWS_REGION>:<ACCOUNT_ID>:disk-space-alerts"
     }
   ]
 }
@@ -170,14 +164,14 @@ AllowDiskSpaceAlertsSNS
 
 * Trusted entity: **EC2**
 * Attach policy: `AllowDiskSpaceAlertsSNS`
-* Role name: `EC2-Disk-Monitor-Role`
+* Example role name: `EC2-Disk-Monitor-Role`
 
 ---
 
-### 5️⃣ Attach Role to EC2 Instance
+### 5️⃣ Attach IAM Role to EC2 Instance
 
 EC2 → Instance → Actions → Security → Modify IAM Role
-Attach: `EC2-Disk-Monitor-Role`
+Attach the role created above.
 
 ✔ Takes effect immediately
 ✔ No reboot required
@@ -210,24 +204,24 @@ aws sts get-caller-identity
 Expected:
 
 ```json
-"Account": "891146181139"
+{
+  "Account": "<ACCOUNT_ID>"
+}
 ```
-
-If this fails → IAM role is not attached correctly.
 
 ---
 
-### 8️⃣ Test SNS Access (Critical)
+### 8️⃣ Test SNS Access
 
 ```bash
 aws sns publish \
-  --topic-arn arn:aws:sns:us-east-1:891146181139:disk-space-alerts \
+  --topic-arn arn:aws:sns:<AWS_REGION>:<ACCOUNT_ID>:disk-space-alerts \
   --message "IAM + SNS test" \
-  --region us-east-1
+  --region <AWS_REGION>
 ```
 
-✔ Email received → AWS side is correct
-❌ AccessDenied → stop and fix IAM
+✔ Email received → AWS configuration is correct
+❌ AccessDenied → IAM role or policy is incorrect
 
 ---
 
@@ -244,8 +238,8 @@ sudo nano /opt/disk_alert.sh
 
 THRESHOLD=90
 PARTITION="/"
-TOPIC_ARN="arn:aws:sns:us-east-1:891146181139:disk-space-alerts"
-AWS_REGION="us-east-1"
+TOPIC_ARN="arn:aws:sns:<AWS_REGION>:<ACCOUNT_ID>:disk-space-alerts"
+AWS_REGION="<AWS_REGION>"
 
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
@@ -298,13 +292,11 @@ Run:
 sudo /opt/disk_alert.sh
 ```
 
-✔ Email received → restore threshold to `90`
+✔ Alert received → restore threshold to `90`
 
 ---
 
 ## 🟢 Part 4 — Automation with Cron
-
-### ⏱ Enable Cron
 
 ```bash
 sudo crontab -e
@@ -328,7 +320,7 @@ Runs:
 sudo tail -f /var/log/syslog
 ```
 
-Expected logs:
+Example logs:
 
 ```
 DiskMonitor: CRITICAL: Disk usage at 92%
@@ -339,7 +331,7 @@ DiskMonitor: SUCCESS: Alert sent to SNS
 
 ## ✅ Final Checklist
 
-✔ SNS topic exists
+✔ SNS topic created
 ✔ Email subscription confirmed
 ✔ IAM policy created
 ✔ IAM role attached to EC2
@@ -354,13 +346,13 @@ DiskMonitor: SUCCESS: Alert sent to SNS
 
 This project demonstrates:
 
-* Real IAM-based security
-* Zero credential leakage
-* Production-safe automation
-* Proper AWS service boundaries
-* Debugging through root cause analysis
+* IAM-based authentication (no secrets stored)
+* Least-privilege security
+* Production-safe cron execution
+* Clear root cause analysis and debugging
+* Clean separation of AWS concerns
 
-This is **how disk monitoring should be built in production**.
+This is a **real-world DevOps implementation**, not a tutorial shortcut.
 
 ---
 
@@ -369,11 +361,9 @@ This is **how disk monitoring should be built in production**.
 * Slack / Teams alerts
 * SMS notifications
 * Multi-partition monitoring
-* systemd timer instead of cron
-* CloudWatch-native version
+* systemd timers instead of cron
+* CloudWatch-native implementation
 
 ---
 
-### ⭐ If this helped you
-
-Consider starring the repository — it helps others find reliable DevOps references.
+⭐ If this repository helped you, consider starring it to help others find reliable DevOps references.
